@@ -1,17 +1,50 @@
 
-#https://www.sbo.net/strategy/football-prediction-model-poisson-distribution/
+dato = "16.07.2018"
+versjon = "1.1"
 
-#https://en.wikipedia.org/wiki/Kelly_criterion
-#https://math.stackexchange.com/questions/662104/kelly-criterion-with-more-than-two-outcomes
+'''
+#-------------INFO-------------------#
+
+Fotballsystem.
+
+Forste versjon: Husker ikke
+
+----------------------
+Revisjoner etter 1.0:
+----------------------
+
+(1) 08.07.2018: La til funksjonalitet for aa laste ned data direkte fra Football-data.co.uk
+(2) 16.07.2018: Erstattet beregning av optimale satser med en custom algoritme for minimerer av variansen istedenfor scipy minimize. Dette for aa kunne gjore beregningen uavhangig av en "black box algoritme" og enklere.
+
+
+
+--------------
+Bakgrunnsinfo
+--------------
+https://www.sbo.net/strategy/football-prediction-model-poisson-distribution/
+https://en.wikipedia.org/wiki/Kelly_criterion
+https://math.stackexchange.com/questions/662104/kelly-criterion-with-more-than-two-outcomes
+
+Utviklet av HSH
+
+'''
+#-------------IMPORTER--------------------#
 
 import numpy as np
 from scipy.stats import poisson
-
-
 from os import listdir
 from os.path import isfile, join
 from os import getcwd
+import sys
+from math import log
+import subprocess
+from optibets import *
 
+
+r = 0
+maxEntro = 0.33*log(0.33)*3*(-1)
+uFaktor = 1.75
+ligaFil = sys.argv[1]
 
 #-------------KLASSER--------------------#
 
@@ -31,6 +64,24 @@ class Kamp:
 
     def hentMaal(self):
         return self._homeGoal,self._awayGoal
+
+class PredKamp:
+    def __init__(self, hjemmelag, bortelag, homeGoal, awayGoal,dato):
+        self._hjemmelag = hjemmelag
+        self._bortelag = bortelag
+        self._homeGoal = int(homeGoal)
+        self._awayGoal = int(awayGoal)
+        self._dato = dato
+
+    def skrivInfo(self):
+        print("Hjemmelag:",self._hjemmelag,"Bortelag:",self._bortelag)
+
+    def hentLag(self):
+        return self._hjemmelag, self._bortelag
+
+    def hentMaal(self):
+        return self._homeGoal,self._awayGoal
+
 
 class Lag:
     def __init__(self,navn):
@@ -208,6 +259,13 @@ class Liga:
         tie = np.sum(np.diagonal(table))
         home = np.sum(np.tril(table, k=-1))
 
+        #Justerer for uavgjort
+        tieUnjust = tie
+        tie = tie*uFaktor
+        theta = (1-tie)/(1-tieUnjust)
+        away = away*theta
+        home = home*theta
+
         resultsProb = {home_team.hentNavn():"{:10.2f}".format(home),'Tie':"{:10.2f}".format(tie), away_team.hentNavn():"{:10.2f}".format(away)}
 
         resultsMaal = {home_team.hentNavn():"{:10.2f}".format(hjemmemaal), away_team.hentNavn():"{:10.2f}".format(bortemaal)}
@@ -225,6 +283,12 @@ class BetKamp:
         self._oddsB = float(oddsB)
         self._liga = liga
 
+        self._satsH = 0
+        self._satsU = 0
+        self._satsB = 0
+
+        self._resultat = ""
+
         self._return ={'H':0,'U':0,'B':0}
 
     def kampInfo(self):
@@ -233,11 +297,19 @@ class BetKamp:
         print("Odds")
         print("H:",self._oddsH,"U:",self._oddsU,"B:",self._oddsB)
 
+    def hentOdds(self):
+        return self._oddsH,self._oddsU,self._oddsB
+
     def hentLag(self):
         return self._hjemmelag, self._bortelag
 
+    def calcRes(self):
+
+        prob = self._liga.prob_mat(self._hjemmelag,self._bortelag)
+
+
     def skrivInfo(self):
-        streng = self._hjemmelag.hentNavn()+';'+self._bortelag.hentNavn()+';'+str(oddsH)+';'+str(oddsU)+';'+str(oddsB)
+        streng = self._hjemmelag.hentNavn()+';'+self._bortelag.hentNavn()+';'+str(self._oddsH)+';'+str(self._oddsU)+';'+str(self._oddsB)
         return streng
 
     def calcReturn(self):
@@ -248,6 +320,27 @@ class BetKamp:
 
         return self._return
 
+    def calcKelly(self):
+        self.calcReturn()
+        self._satsH=self._return['H']/float(self._oddsH-1)
+        self._satsU=self._return['U']/float(self._oddsU-1)
+        self._satsB=self._return['B']/float(self._oddsB-1)
+        return self._satsH,self._satsU,self._satsB
+
+    def calcRueSalv(self):
+        prob = self._liga.prob_mat(self._hjemmelag,self._bortelag)
+        print(prob)
+        self._satsH=1./float(2*self._oddsH*(1-float(prob[self._hjemmelag.hentNavn()])))
+        self._satsU=1./float(2*self._oddsU*(1-float(prob['Tie'])))**-1
+        self._satsB=1./float(2*self._oddsB*(1-float(prob[self._bortelag.hentNavn()])))
+        return self._satsH,self._satsU,self._satsB
+
+class Bet:
+
+    def __init__(self,odds,BetKamp):
+        self._odds = odds
+        self._betkamp = BetKamp
+
 def factorial(n):
     if n==0:
         return 1
@@ -257,7 +350,65 @@ def factorial(n):
 #def poisson(m,x):
 #    return 2.71**(-m)*m**x/factorial(x)
 
+def finnStorste(res):
+    storste = -1.0
+    keyStorste = ""
+    hub = ""
+    k = 0
+    for key,value in res.items():
+        if float(value) > float(storste):
+            storste = value
+            keyStorste = str(key)
+            k+=1
+
+    return keyStorste,k,storste
+
+def entropiMaks(res):
+    entropi = 0.0
+    for key,value in res.items():
+        entropi += log(float(value))*float(value)
+    return -1*entropi/maxEntro
+
 #-------------MAIN--------------------#
+
+def variance(bets):
+    sum = 0
+    mean = 0
+    i = 0
+    for bet in bets:
+        mean += float(bet)*float(oddsAlle[i])
+        i+= 1
+    mean = mean/len(oddsAlle)
+    i = 0
+    for bet in bets:
+        sum += (float(bet)*float(oddsAlle[i])-mean)**2
+        i+= 1
+    return sum
+
+
+def snittOdds(x):
+    tot = 0
+    p = []
+    for i in range(len(x)):
+        tot += oddsAlle[i]*x[i]
+    return tot/sum(x)
+
+
+def percent(x,total):
+    sum = len(x)
+    p = []
+    for y in x:
+        p.append(y/len(x)*total)
+    return p
+
+def utlegg(bets):
+    return sum(bets)-len(bets)
+
+
+def callback(xk):
+    print("Object",variance(xk))
+
+
 
 def importKamper(fil):
     data = open(fil)
@@ -271,18 +422,31 @@ def importKamper(fil):
         if hjemmelag != None and bortelag != None:
             nyeKamper.append(BetKamp(hjemmelag,bortelag,h,u,b,liga))
 
+def space():
+    print("")
+    print("")
+    print("")
+
 #Oppretter lister
 lag = []
 kamper = []
 nyeKamper = []
 liga = Liga(kamper)
+prediksjonsKamper = []
 
 #Leser inn data
-file = open('Bundesliga.csv')
+try:
+    file = open(ligaFil)
+except:
+    commandCall = "python newData.py 2018 " + ligaFil
+    subprocess.call(commandCall,shell = True)
+    file = open(ligaFil)
 forsteLinje = True
 #Legger til kamper
+i = 0
+antall = 10**6
 for line in file:
-    if not forsteLinje:
+    if not forsteLinje and i < antall:
         kampdata = line.split(';')
         dato = kampdata[1]
         hjemmelag = kampdata[2]
@@ -290,8 +454,17 @@ for line in file:
         homeGoal = kampdata[4]
         awayGoal = kampdata[5]
         kamper.append(Kamp(hjemmelag, bortelag,homeGoal,awayGoal,dato))
+    elif i >= antall:
+        kampdata = line.split(';')
+        dato = kampdata[1]
+        hjemmelag = kampdata[2]
+        bortelag = kampdata[3]
+        homeGoal = kampdata[4]
+        awayGoal = kampdata[5]
+        prediksjonsKamper.append(Kamp(hjemmelag, bortelag,homeGoal,awayGoal,dato))
     else:
         forsteLinje = False
+    i+=1
 
 #Legger til lag
 for kamp in kamper:
@@ -301,6 +474,7 @@ for kamp in kamper:
 
 
 #Legger kamper til lag
+#Spilte kamper
 for lag in liga.hentAlleLag():
     for kamp in kamper:
         lagA,lagB = kamp.hentLag()
@@ -314,15 +488,6 @@ for lag in liga.hentAlleLag():
 #Regner ut parametere
 liga.beregnSnitt()
 
-'''
-for lag in liga.hentAlleLag():
-    lag.skrivParametere()
-    lag.skrivMaal()
-    lag.antallKamper()
-    print("")
-'''
-
-
 #Neste fase:
 #Lese inn Odds og beregne gevinst per spill
 #Leser inn og lager BetKamp-objekter
@@ -334,15 +499,24 @@ fortsett = True
 
 while fortsett:
     print("")
+    print("")
+    print("")
+    print("#_________________________________#")
+    print("Fotballsystem " +versjon)
+    print(dato)
     print("#_________________________________#")
     print("Meny")
     print("#_________________________________#")
     print("0: Avslutt")
     print("1: Legg til ny kamp")
-    print("2: Skriv ut alle kamper")
-    print("3: Beregn sannsynligheter")
+    print("2: Skriv ut alle odds")
+    print("3: Skriv ut alle sannsynligheter")
     print("4: Lagre kamper til fil")
     print("5: Hente kamper fra fil")
+    print("6: Skriv beregnede sannsynligheter til fil")
+    print("7: Beregn optimale satser")
+    print("8: Last ned ny data")
+    print("#_________________________________#")
 
     svar = int(input("Tast inn ønsket valg: "))
 
@@ -374,20 +548,21 @@ while fortsett:
             kamp.kampInfo()
 
     elif svar == 3:
+        print("")
+        print("")
+        print("#_________________________________#")
         print("Informasjon om kamper")
+        print("#_________________________________#")
+        print("")
+        print("")
+        print("Sannsynligheter")
         i= 0
         for kamp in nyeKamper:
             lag = kamp.hentLag()
             res = kamp.calcReturn()
-            print("")
-            print("Kamp:"+str(i))
-            print(lag[0].hentNavn(),res['H'])
-            print("U:",res['U'])
-            print(lag[1].hentNavn(),res['B'])
-            print("Sannsynligheter")
+            bet1 = kamp.calcKelly()
+            print("----------------------------------------------------------------------------")
             print(liga.prob_mat(lag[0],lag[1]))
-
-
             i += 1
 
     elif svar == 4:
@@ -407,3 +582,70 @@ while fortsett:
             print("Fil: ",i," ",onlyfiles[i])
         fil = int(input("Velg fil: "))
         importKamper(onlyfiles[fil])
+
+    elif svar == 6:
+        filnavn = input("Filnavn ") +'.csv'
+        fil = open(filnavn,'w')
+        for kamp in nyeKamper:
+
+            lag = kamp.hentLag()
+            res = kamp.calcReturn()
+            bet1 = kamp.calcKelly()
+            print("----------------------------------------------------------------------------")
+            res = liga.prob_mat(lag[0],lag[1])
+            linje = ""
+            for key,value in res.items():
+                #print(key,value)
+                linje += ';'+str(key)+';'+str(value)
+            fil.write(linje+'\n')
+        fil.close()
+
+    elif svar == 7:
+        space()
+        bank = float(input("Oppgi total banksum: "))
+        pres = float(input("Oppgi presisjon: "))
+
+        print("--------------------------------------------------------------------------------")
+        print("RESULTATER")
+        print("--------------------------------------------------------------------------------")
+        i = 0
+        oddsAlle = []
+        for kamp in nyeKamper:
+            lag = kamp.hentLag()
+            res = liga.prob_mat(lag[0],lag[1])
+            antattVinner = finnStorste(res)
+            oddsAlle.append(kamp.hentOdds()[antattVinner[1]-1])
+
+        #Beregner bets
+        optiBet = optimalBets(oddsAlle,1)
+        so = snittOdds(optiBet[:len(optiBet)-1])##Beregner snitt-odds
+        print("Snitt-odds",so)
+        kelly = (pres*so-1)/(so-1) #Beregner Kelly-score
+        bank = bank*kelly #beregner hvor mye som skal satses av bankroll
+        ##Skriver ut informasjon
+        optiBet = optimalBets(oddsAlle,bank)
+
+        print("Andel av bankroll som bør satses (Kelly/%):",int(kelly*100))
+        print("Totalsats (kr):",int(bank))
+        print("--------------------------------------------------------------------------------")
+
+
+        #Skriver ut samlet informasjon
+        for kamp in nyeKamper:
+            lag = kamp.hentLag()
+            res = liga.prob_mat(lag[0],lag[1])
+            antattVinner = finnStorste(res)
+            print("Kamp",i,"MS:",antattVinner[0],"VS:",float(antattVinner[2])*100,"%","O:",kamp.hentOdds()[antattVinner[1]-1],"Sats:",int(optiBet[i]),"kr")
+            odds = kamp.hentOdds()[antattVinner[1]-1]
+            print("--------------------------------------------------------------------------------")
+            i += 1
+
+        temp = input("Trykk en tast for å gå tilbake til hovedmenyen")
+
+    elif svar == 8:
+        try:
+            call = "python newData.py 2018 " + ligaFil
+            subprocess.call(call,shell = True)
+            print("Nedlasting fullført")
+        except:
+            print("Nedlasting feilet")
